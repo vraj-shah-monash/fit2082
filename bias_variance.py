@@ -5,7 +5,7 @@ an empirical bias/variance decomposition from the per-example predictions.
 Usage:
     python bias_variance.py --model gru --dataset InsectSound --fold 0 --seeds 5 --epochs 20
 
-This is your project's actual core measurement -- not just accuracy.
+This is the project's actual core measurement -- not just accuracy.
 """
 
 import argparse
