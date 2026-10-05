@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+title: "MS4N: A Simple State Space Model for Multivariate Time Series Classification"
+message: "If you use this software, please cite the associated paper."
+type: software
+
+authors:
+  - family-names: Saadatmand
+    given-names: Hassan
+  - family-names: Webb
+    given-names: Geoffrey I.
+  - family-names: Rezatofighi
+    given-names: Hamid
+  - family-names: Salehi
+    given-names: Mahsa
+
+repository-code: "https://github.com/h-saadatmand/MS4N"
+url: "https://arxiv.org/abs/2605.27406"
+
+abstract: >
+  Official implementation of MS4 and MS4N, lightweight state space models
+  for multivariate time series classification.
+
+keywords:
+  - state space models
+  - time series classification
+  - S4D
+  - Mamba
+  - multivariate time series
+  - deep learning
+
+license: MIT

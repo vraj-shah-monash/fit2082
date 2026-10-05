@@ -1,0 +1,6 @@
+numpy==1.26.4
+scikit-learn==1.4.2
+matplotlib==3.8.4
+torch==2.1.2
+einops==0.8.0
+huggingface-hub==1.29.0
