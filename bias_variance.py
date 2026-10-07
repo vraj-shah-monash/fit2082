@@ -1,48 +1,48 @@
 """
-Runs a model multiple times (different random seeds, same fold) and computes
-an empirical bias/variance decomposition from the per-example predictions.
+Runs a model across ALL folds, repeating each fold with multiple random
+seeds, and computes an empirical bias/variance decomposition from the
+per-example predictions -- implementing the "5 seeds x 5 folds = 25 runs
+per architecture" protocol.
 
 Usage:
-    python bias_variance.py --model gru --dataset InsectSound --fold 0 --seeds 5 --epochs 20
+    python bias_variance.py --model gru --dataset FordChallenge --input_size 30 --num_classes 2 --epochs 200 --seeds 5
+    python bias_variance.py --model ms4n --dataset InsectSound --seq_len 600 --epochs 200 --seeds 5 --folds 0,1,2,3,4
 
-This is the project's actual core measurement -- not just accuracy.
+Why this matters: bias and variance CANNOT be computed from accuracy alone
+(two models can have identical accuracy via completely different mixes of
+bias vs. variance). This script saves every test example's PREDICTED LABEL
+on every run, not just the final accuracy -- that per-example detail is
+the actual ingredient the decomposition formula needs. See the comments in
+bias_variance_decomposition() for the exact formula.
 """
 
 import argparse
 import numpy as np
 import torch
 
-from models import gru, informer, ms4n #, mamba
-from monster.monster_utils import get_dataloaders, predict_all
+from models import gru, informer, mamba, ms4n
+from monster.monster_utils import get_dataloaders, predict_all, run_training
 
 MODEL_MODULES = {"gru": gru, "informer": informer, "mamba": mamba, "ms4n": ms4n}
 
-# Each model module needs a matching *_build(...) helper below, since run()
-# does load+train+evaluate all at once and we need the trained model object
-# back out to call predict_all() ourselves.
 
-
-def build_and_train(model_name, dataset_name, fold, input_size, num_classes, num_epochs, device):
-    """Loads data, builds the requested model, trains it, and returns the
-    trained model plus the test loader (so we can extract per-example
-    predictions afterwards).
+def build_model(model_name, input_size, num_classes, seq_len, device):
+    """Builds the requested (untrained) model. seq_len is only used by MS4N,
+    which needs it up front to construct its config dict.
     """
-    train_loader, test_loader = get_dataloaders(dataset_name, fold=fold)
-
     if model_name == "gru":
-        model = gru.GRUClassifier(input_size=input_size, hidden_size=64, num_classes=num_classes).to(device)
+        model = gru.GRUClassifier(input_size=input_size, hidden_size=64, num_classes=num_classes)
     elif model_name == "informer":
-        model = informer.InformerClassifier(input_size=input_size, num_classes=num_classes).to(device)
+        model = informer.InformerClassifier(input_size=input_size, num_classes=num_classes)
     elif model_name == "mamba":
-        model = mamba.MambaClassifier(input_size=input_size, num_classes=num_classes).to(device)
+        model = mamba.MambaClassifier(input_size=input_size, num_classes=num_classes)
     elif model_name == "ms4n":
-        model = ms4n.MS4NClassifier(input_size=input_size, num_classes=num_classes).to(device)
+        if seq_len is None:
+            raise ValueError("--seq_len is required for --model ms4n.")
+        model = ms4n.MS4NClassifier(input_size=input_size, seq_len=seq_len, num_classes=num_classes)
     else:
         raise ValueError(f"Unknown model: {model_name}")
-
-    from monster.monster_utils import run_training
-    run_training(model, train_loader, test_loader, device, num_epochs=num_epochs)
-    return model, test_loader
+    return model.to(device)
 
 
 def bias_variance_decomposition(all_run_preds, y_true):
@@ -51,11 +51,17 @@ def bias_variance_decomposition(all_run_preds, y_true):
                    is one seed's predicted labels, in fixed test-set order.
     y_true: array of shape (num_test_examples,) -- the true labels.
 
-    Returns (bias, variance, mean_accuracy) using the standard practical
-    decomposition: for each example, the "main prediction" is the most
-    common label predicted across seeds. Bias = how often that main
-    prediction is wrong. Variance = how often individual runs disagree
-    with the main prediction (regardless of correctness).
+    Returns per-example bias and variance arrays (not yet averaged), plus
+    per-run accuracies -- the per-example arrays are what let us correctly
+    pool results across folds afterward (see run_full_protocol below),
+    rather than averaging an already-averaged number.
+
+    Formula (standard practical bias/variance decomposition for 0-1 loss):
+    - main_pred(x) = the most common predicted label for x, across seeds
+      (this approximates the model's "expected" prediction)
+    - bias(x)     = 1 if main_pred(x) != true_label(x), else 0
+    - variance(x) = fraction of seeds whose prediction for x disagreed
+                    with main_pred(x)
     """
     num_seeds, num_examples = all_run_preds.shape
 
@@ -65,61 +71,116 @@ def bias_variance_decomposition(all_run_preds, y_true):
         main_preds[i] = values[np.argmax(counts)]
 
     bias_per_example = (main_preds != y_true).astype(float)
-    bias = bias_per_example.mean()
-
     variance_per_example = (all_run_preds != main_preds[None, :]).mean(axis=0)
-    variance = variance_per_example.mean()
 
     per_run_accuracy = (all_run_preds == y_true[None, :]).mean(axis=1)
-    mean_accuracy = per_run_accuracy.mean()
-    std_accuracy = per_run_accuracy.std()
 
-    return bias, variance, mean_accuracy, std_accuracy, per_run_accuracy
+    return bias_per_example, variance_per_example, per_run_accuracy
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=MODEL_MODULES.keys(), required=True)
-    parser.add_argument("--dataset", default="InsectSound")
-    parser.add_argument("--fold", type=int, default=0)
-    parser.add_argument("--num_classes", type=int, default=10)
-    parser.add_argument("--input_size", type=int, default=1)
-    parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--seeds", type=int, default=5, help="Number of repeated runs.")
-    args = parser.parse_args()
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Running {args.seeds} seeds of {args.model} on {args.dataset} fold {args.fold}...")
-
+def run_one_fold(model_name, dataset_name, fold, input_size, num_classes, seq_len, num_epochs, num_seeds, device):
+    """Trains `num_seeds` independently-seeded models on one fold, and
+    returns that fold's per-example bias/variance arrays plus the raw
+    per-run accuracies (for the quick mean/std sanity check).
+    """
     all_run_preds = []
     y_true = None
 
-    for seed in range(args.seeds):
-        print(f"\n=== Seed {seed} ===")
+    for seed in range(num_seeds):
+        print(f"\n  --- Fold {fold}, seed {seed} ---")
         torch.manual_seed(seed)
 
-        model, test_loader = build_and_train(
-            args.model, args.dataset, args.fold,
-            args.input_size, args.num_classes, args.epochs, device,
-        )
+        train_loader, test_loader = get_dataloaders(dataset_name, fold=fold)
+        model = build_model(model_name, input_size, num_classes, seq_len, device)
+        run_training(model, train_loader, test_loader, device, num_epochs=num_epochs)
+
         preds = predict_all(model, test_loader, device)
         all_run_preds.append(preds)
 
         if y_true is None:
             y_true = np.concatenate([y.numpy() for _, y in test_loader])
 
-    all_run_preds = np.stack(all_run_preds)  # (num_seeds, num_examples)
+    all_run_preds = np.stack(all_run_preds)  # (num_seeds, num_examples_in_this_fold)
+    bias_pe, variance_pe, per_run_acc = bias_variance_decomposition(all_run_preds, y_true)
+    return bias_pe, variance_pe, per_run_acc
 
-    bias, variance, mean_acc, std_acc, per_run_acc = bias_variance_decomposition(all_run_preds, y_true)
 
-    print("\n" + "=" * 50)
-    print(f"Results over {args.seeds} seeds, {args.model} on {args.dataset} fold {args.fold}")
-    print("=" * 50)
-    print(f"Per-run accuracies: {np.round(per_run_acc, 4)}")
-    print(f"Mean accuracy:      {mean_acc:.4f}")
-    print(f"Std of accuracy:    {std_acc:.4f}  (quick-and-dirty variance signal)")
-    print(f"Bias:               {bias:.4f}  (fraction of examples the 'main' prediction gets wrong)")
-    print(f"Variance:           {variance:.4f}  (fraction of individual runs disagreeing with the main prediction)")
+def run_full_protocol(model_name, dataset_name, folds, input_size, num_classes, seq_len, num_epochs, num_seeds, device):
+    """Runs every fold x seed combination (e.g. 5 folds x 5 seeds = 25 runs)
+    and pools the per-example bias/variance arrays across ALL folds into a
+    single architecture-level bias and variance score. Pooling is valid
+    here because every test example across the 5 folds is a DIFFERENT
+    example (k-fold CV splits the dataset, it doesn't resample it), so
+    concatenating per-example results across folds is equivalent to
+    computing bias/variance over the full dataset.
+    """
+    per_fold_results = {}
+    all_bias_pe = []
+    all_variance_pe = []
+    all_run_accs = {}
+
+    for fold in folds:
+        print(f"\n{'='*60}\nFOLD {fold}\n{'='*60}")
+        bias_pe, variance_pe, per_run_acc = run_one_fold(
+            model_name, dataset_name, fold, input_size, num_classes, seq_len, num_epochs, num_seeds, device,
+        )
+        per_fold_results[fold] = {
+            "bias": bias_pe.mean(),
+            "variance": variance_pe.mean(),
+            "mean_acc": per_run_acc.mean(),
+            "std_acc": per_run_acc.std(),
+            "per_run_acc": per_run_acc,
+        }
+        all_bias_pe.append(bias_pe)
+        all_variance_pe.append(variance_pe)
+        all_run_accs[fold] = per_run_acc
+
+    pooled_bias = np.concatenate(all_bias_pe).mean()
+    pooled_variance = np.concatenate(all_variance_pe).mean()
+    all_25_accuracies = np.concatenate(list(all_run_accs.values()))
+
+    return per_fold_results, pooled_bias, pooled_variance, all_25_accuracies
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", choices=MODEL_MODULES.keys(), required=True)
+    parser.add_argument("--dataset", default="InsectSound")
+    parser.add_argument("--folds", default="0,1,2,3,4",
+                         help="Comma-separated fold indices, e.g. '0,1,2,3,4' (default: all 5) or '0' for just one.")
+    parser.add_argument("--num_classes", type=int, default=10)
+    parser.add_argument("--input_size", type=int, default=1)
+    parser.add_argument("--seq_len", type=int, default=None, help="Required for --model ms4n.")
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--seeds", type=int, default=5, help="Number of repeated runs PER FOLD.")
+    args = parser.parse_args()
+
+    folds = [int(f) for f in args.folds.split(",")]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    total_runs = len(folds) * args.seeds
+    print(f"Running {args.model} on {args.dataset}: {len(folds)} folds x {args.seeds} seeds "
+          f"= {total_runs} total training runs.")
+
+    per_fold_results, pooled_bias, pooled_variance, all_accuracies = run_full_protocol(
+        args.model, args.dataset, folds, args.input_size, args.num_classes,
+        args.seq_len, args.epochs, args.seeds, device,
+    )
+
+    print("\n" + "=" * 60)
+    print(f"PER-FOLD RESULTS -- {args.model} on {args.dataset}")
+    print("=" * 60)
+    for fold, r in per_fold_results.items():
+        print(f"Fold {fold}: mean_acc={r['mean_acc']:.4f}  std_acc={r['std_acc']:.4f}  "
+              f"bias={r['bias']:.4f}  variance={r['variance']:.4f}")
+
+    print("\n" + "=" * 60)
+    print(f"OVERALL (pooled across {len(folds)} folds, {total_runs} total runs)")
+    print("=" * 60)
+    print(f"Mean accuracy:  {all_accuracies.mean():.4f}")
+    print(f"Std of accuracy (across all {total_runs} runs): {all_accuracies.std():.4f}")
+    print(f"Bias:           {pooled_bias:.4f}  (fraction of examples the 'main' prediction gets wrong)")
+    print(f"Variance:       {pooled_variance:.4f}  (fraction of individual runs disagreeing with the main prediction)")
 
 
 if __name__ == "__main__":

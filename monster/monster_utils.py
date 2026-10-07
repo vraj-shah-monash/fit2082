@@ -76,6 +76,23 @@ def evaluate(model, loader, device):
     return correct / total
 
 
+def predict_all(model, loader, device):
+    """Returns every test-set prediction as a single array, in the loader's
+    fixed order (test_loader uses shuffle=False, so this order is identical
+    across repeated runs -- required for aligning predictions per example
+    when computing bias/variance across seeds).
+    """
+    model.eval()
+    all_preds = []
+    with torch.no_grad():
+        for X_batch, y_batch in loader:
+            X_batch = X_batch.to(device)
+            outputs = model(X_batch)
+            preds = outputs.argmax(dim=1)
+            all_preds.append(preds.cpu())
+    return torch.cat(all_preds).numpy()
+
+
 def run_training(model, train_loader, test_loader, device, num_epochs=10, lr=1e-3):
     """Standard training + evaluation run, shared across all architectures."""
     criterion = torch.nn.CrossEntropyLoss()
