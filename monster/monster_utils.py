@@ -103,7 +103,7 @@ def run_training(model, train_loader, test_loader, device, num_epochs=10, lr=1e-
             model, train_loader, optimizer, criterion, device,
             epoch_num=epoch + 1, num_epochs=num_epochs,
         )
-        print(f"Epoch {epoch + 1}/{num_epochs}: train loss = {train_loss:.4f}")
+        #print(f"Epoch {epoch + 1}/{num_epochs}: train loss = {train_loss:.4f}")
 
     test_acc = evaluate(model, test_loader, device)
     print(f"Test accuracy: {test_acc:.4f}")
