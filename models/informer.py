@@ -43,13 +43,17 @@ class PositionalEncoding(nn.Module):
 
 
 class InformerClassifier(nn.Module):
-    def __init__(self, input_size, d_model=64, n_heads=4, num_layers=2, num_classes=10, dropout=0.1):
+    def __init__(self, input_size, d_model=64, n_heads=4, num_layers=1, num_classes=10, dropout=0.1,
+                 dim_feedforward=None):
         super().__init__()
         self.input_proj = nn.Linear(input_size, d_model)   # project raw channels -> d_model
         self.pos_encoding = PositionalEncoding(d_model)
 
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model, nhead=n_heads, dim_feedforward=d_model * 4,
+            d_model=d_model, nhead=n_heads,
+            # None -> the usual 4 x d_model. Lower it to shrink the model's parameter count
+            # (run param_count.py to see what value matches another architecture).
+            dim_feedforward=dim_feedforward or d_model * 4,
             dropout=dropout, batch_first=True,
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
@@ -66,7 +70,7 @@ class InformerClassifier(nn.Module):
 
 
 def run(dataset_name="AudioMNIST-DS", fold=0, input_size=1, num_classes=10,
-        d_model=64, n_heads=4, num_layers=2, num_epochs=10, device=None):
+        d_model=64, n_heads=4, num_layers=1, num_epochs=10, dim_feedforward=None, device=None):
     """Loads a MONSTER dataset/fold, builds an Informer-style classifier, and
     trains it. Called from main.py; keeps config as explicit arguments so
     main.py can override per dataset without editing this file.
@@ -86,6 +90,7 @@ def run(dataset_name="AudioMNIST-DS", fold=0, input_size=1, num_classes=10,
         n_heads=n_heads,
         num_layers=num_layers,
         num_classes=num_classes,
+        dim_feedforward=dim_feedforward,
     ).to(device)
 
     return run_training(model, train_loader, test_loader, device, num_epochs=num_epochs)

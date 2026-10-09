@@ -38,7 +38,7 @@ except ImportError as e:
 
 
 class MambaClassifier(nn.Module):
-    def __init__(self, input_size, d_model=64, num_layers=4, num_classes=10, d_state=16):
+    def __init__(self, input_size, d_model=64, num_layers=1, num_classes=10, d_state=16):
         super().__init__()
         self.input_proj = nn.Linear(input_size, d_model)
 
@@ -61,7 +61,7 @@ class MambaClassifier(nn.Module):
 
 
 def run(dataset_name="AudioMNIST", fold=0, input_size=1, num_classes=10,
-        d_model=64, num_layers=4, d_state=16, num_epochs=10, device=None):
+        d_model=64, num_layers=1, d_state=16, num_epochs=10, device=None):
     """Loads a MONSTER dataset/fold, builds a Mamba classifier, and trains it.
     Called from main.py; keeps config as explicit arguments so main.py can
     override per dataset without editing this file.
