@@ -17,6 +17,7 @@ bias_variance_decomposition() for the exact formula.
 """
 
 import argparse
+import os
 import numpy as np
 import torch
 
@@ -105,7 +106,33 @@ def run_one_fold(model_name, dataset_name, fold, input_size, num_classes, seq_le
     return bias_pe, variance_pe, per_run_acc
 
 
-def run_full_protocol(model_name, dataset_name, folds, input_size, num_classes, seq_len, num_epochs, num_seeds, device):
+def fold_path(results_dir, model_name, dataset_name, fold):
+    return os.path.join(results_dir, f"{model_name}_{dataset_name}_fold{fold}.npz")
+
+
+def save_fold(path, bias_pe, variance_pe, per_run_acc, num_epochs, num_seeds):
+    """Saves one finished fold so it survives a crash or a Colab disconnect."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    np.savez(path, bias_pe=bias_pe, variance_pe=variance_pe, per_run_acc=per_run_acc,
+             epochs=num_epochs, seeds=num_seeds)
+
+
+def load_fold(path, num_epochs, num_seeds):
+    """Returns a fold's saved results, or None if there is no file or it was
+    produced with different epochs/seeds (so results from different settings
+    are never silently mixed together)."""
+    if not os.path.exists(path):
+        return None
+    d = np.load(path)
+    if int(d["epochs"]) != num_epochs or int(d["seeds"]) != num_seeds:
+        print(f"  (ignoring {path}: saved with epochs={int(d['epochs'])}, seeds={int(d['seeds'])}; "
+              f"this run uses epochs={num_epochs}, seeds={num_seeds})")
+        return None
+    return d["bias_pe"], d["variance_pe"], d["per_run_acc"]
+
+
+def run_full_protocol(model_name, dataset_name, folds, input_size, num_classes, seq_len, num_epochs, num_seeds, device,
+                      results_dir="results", force=False):
     """Runs every fold x seed combination (e.g. 5 folds x 5 seeds = 25 runs)
     and pools the per-example bias/variance arrays across ALL folds into a
     single architecture-level bias and variance score. Pooling is valid
@@ -121,9 +148,18 @@ def run_full_protocol(model_name, dataset_name, folds, input_size, num_classes, 
 
     for fold in folds:
         print(f"\n{'='*60}\nFOLD {fold}\n{'='*60}")
-        bias_pe, variance_pe, per_run_acc = run_one_fold(
-            model_name, dataset_name, fold, input_size, num_classes, seq_len, num_epochs, num_seeds, device,
-        )
+        path = fold_path(results_dir, model_name, dataset_name, fold)
+        saved = None if force else load_fold(path, num_epochs, num_seeds)
+        if saved is not None:
+            bias_pe, variance_pe, per_run_acc = saved
+            print(f"  Fold {fold} already finished -- loaded from {path} (use --force to retrain)")
+        else:
+            bias_pe, variance_pe, per_run_acc = run_one_fold(
+                model_name, dataset_name, fold, input_size, num_classes, seq_len, num_epochs, num_seeds, device,
+            )
+            save_fold(path, bias_pe, variance_pe, per_run_acc, num_epochs, num_seeds)
+        print(f"\n  >>> FOLD {fold} DONE: mean_acc={per_run_acc.mean():.4f}  std_acc={per_run_acc.std():.4f}  "
+              f"bias={bias_pe.mean():.4f}  variance={variance_pe.mean():.4f}")
         per_fold_results[fold] = {
             "bias": bias_pe.mean(),
             "variance": variance_pe.mean(),
@@ -153,6 +189,9 @@ def main():
     parser.add_argument("--seq_len", type=int, default=None, help="Required for --model ms4n.")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--seeds", type=int, default=5, help="Number of repeated runs PER FOLD.")
+    parser.add_argument("--results_dir", default="results",
+                         help="Where finished folds are saved. Re-running skips folds already saved here.")
+    parser.add_argument("--force", action="store_true", help="Retrain folds even if a saved result exists.")
     args = parser.parse_args()
 
     folds = [int(f) for f in args.folds.split(",")]
@@ -165,6 +204,7 @@ def main():
     per_fold_results, pooled_bias, pooled_variance, all_accuracies = run_full_protocol(
         args.model, args.dataset, folds, args.input_size, args.num_classes,
         args.seq_len, args.epochs, args.seeds, device,
+        results_dir=args.results_dir, force=args.force,
     )
 
     print("\n" + "=" * 60)
